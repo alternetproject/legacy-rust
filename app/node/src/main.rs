@@ -1,0 +1,1034 @@
+cfg_if::cfg_if!(
+    if #[cfg(not(any(
+        feature = "bootstrap",
+        feature = "client",
+        feature = "server",
+        feature = "relay",
+        feature = "malicious_bootstrap",
+        feature = "malicious_client",
+        feature = "malicious_server",
+        feature = "malicious_relay"
+    )))] {
+        compile_error!("Enable exactly one of `client`, `server`, `relay`, `bootstrap`, or their malicious variants.");
+    } else if #[cfg(all(feature = "bootstrap", any(
+        feature = "client",
+        feature = "server",
+        feature = "relay",
+        feature = "malicious_bootstrap",
+        feature = "malicious_client",
+        feature = "malicious_server",
+        feature = "malicious_relay"
+    )))] {
+        compile_error!("Only one of `client`, `server`, `relay`, `bootstrap`, or their malicious variants may be enabled at a time.");
+    } else if #[cfg(feature = "client", any(
+        feature = "bootstrap",
+        feature = "server",
+        feature = "relay",
+        feature = "malicious_bootstrap",
+        feature = "malicious_client",
+        feature = "malicious_server",
+        feature = "malicious_relay"
+    ))] {
+        compile_error!("Only one of `client`, `server`, `relay`, `bootstrap`, or their malicious variants may be enabled at a time.");
+    } else if #[cfg(feature = "server", any(
+        feature = "bootstrap",
+        feature = "server",
+        feature = "relay",
+        feature = "malicious_bootstrap",
+        feature = "malicious_client",
+        feature = "malicious_server",
+        feature = "malicious_relay"
+    ))] {
+        compile_error!("Only one of `client`, `server`, `relay`, `bootstrap`, or their malicious variants may be enabled at a time.");
+    } else if #[cfg(feature = "relay", any(
+        feature = "client",
+        feature = "server",
+        feature = "bootstrap",
+        feature = "malicious_bootstrap",
+        feature = "malicious_client",
+        feature = "malicious_server",
+        feature = "malicious_relay"
+    ))] {
+        compile_error!("Only one of `client`, `server`, `relay`, `bootstrap`, or their malicious variants may be enabled at a time.");
+    } else if #[cfg(feature = "malicious_bootstrap", any(
+        feature = "client",
+        feature = "server",
+        feature = "bootstrap",
+        feature = "relay",
+        feature = "malicious_client",
+        feature = "malicious_server",
+        feature = "malicious_relay"
+    ))] {
+        compile_error!("Only one of `client`, `server`, `relay`, `bootstrap`, or their malicious variants may be enabled at a time.");
+    } else if #[cfg(feature = "malicious_client", any(
+        feature = "client",
+        feature = "server",
+        feature = "bootstrap",
+        feature = "relay",
+        feature = "malicious_bootstrap",
+        feature = "malicious_server",
+        feature = "malicious_relay"
+    ))] {
+        compile_error!("Only one of `client`, `server`, `relay`, `bootstrap`, or their malicious variants may be enabled at a time.");
+    } else if #[cfg(feature = "malicious_server", any(
+        feature = "client",
+        feature = "server",
+        feature = "bootstrap",
+        feature = "relay",
+        feature = "malicious_bootstrap",
+        feature = "malicious_client",
+        feature = "malicious_relay"
+    ))] {
+        compile_error!("Only one of `client`, `server`, `relay`, `bootstrap`, or their malicious variants may be enabled at a time.");
+    } else if #[cfg(feature = "malicious_relay", any(
+        feature = "client",
+        feature = "server",
+        feature = "bootstrap",
+        feature = "relay",
+        feature = "malicious_bootstrap",
+        feature = "malicious_client",
+        feature = "malicious_server"
+    ))] {
+        compile_error!("Only one of `client`, `server`, `relay`, `bootstrap`, or their malicious variants may be enabled at a time.");
+    }
+);
+
+use libp2p::Transport as _;
+use libp2p::swarm;
+use libp2p::identify;
+use libp2p::kad;
+use libp2p::quic;
+use libp2p::autonat;
+use libp2p::futures::StreamExt as _;
+use libp2p::relay;
+use clap::Parser as _;
+use prost::Message;
+use ubyte::ToByteUnit as _;
+use num::ToPrimitive as _;
+
+mod cmn;
+mod config;
+mod env_key;
+mod grpc;
+mod workflow;
+mod stream;
+mod sub_system;
+
+
+#[derive(Debug)]
+#[derive(Clone)]
+#[derive(PartialEq)]
+#[derive(Eq)]
+#[derive(derive_more::From)]
+pub struct Identity<T>(lib_cryptography::public_key::PublicKey<T>, libp2p::PeerId);
+
+impl<T> Into<(lib_cryptography::public_key::PublicKey<T>, libp2p::PeerId)> for Identity<T> {
+	fn into(self) -> (lib_cryptography::public_key::PublicKey<T>, libp2p::PeerId) {
+		let Self(public_key, peer) = self;
+		(public_key, peer)
+	}
+}
+
+
+#[derive(Debug)]
+#[derive(Clone)]
+#[derive(PartialEq)]
+#[derive(Eq)]
+#[derive(derive_more::From)]
+#[derive(derive_more::Add)]
+#[derive(derive_more::Sub)]
+struct Balance(u64);
+
+#[derive(Debug)]
+#[derive(Clone)]
+#[derive(PartialEq)]
+#[derive(Eq)]
+#[derive(derive_more::From)]
+#[derive(derive_more::Add)]
+#[derive(derive_more::Sub)]
+struct Fee(u64);
+
+// time in seconds
+#[derive(Debug)]
+#[derive(Clone)]
+#[derive(PartialEq)]
+#[derive(Eq)]
+#[derive(derive_more::From)]
+struct Duration(u64);
+
+
+#[derive(Debug)]
+#[derive(Clone)]
+#[derive(PartialEq)]
+#[derive(Eq)]
+#[derive(Hash)]
+#[derive(derive_more::From)]
+struct Domain(String);
+
+struct BlindProof<T>(lib_cryptography::hash::Hash<T>);
+
+/// External dns source of truth provider, may be swapped and implemented by
+/// other chains or networks, the nodes rely on this sytem for value transfer
+/// and cryptographic proofs
+#[async_trait::async_trait]
+trait Dns {
+	type LocalPublicKey;
+	type LocalSecretKey;
+	type LocalAlgorithm;
+	type ForeignAlgorithm;
+	
+	async fn attestation(&self, signer: lib_cryptography::public_key::PublicKey<Self::ForeignAlgorithm>) -> Option<lib_cryptography::public_key::PublicKey<Self::LocalAlgorithm>>;
+	async fn attest(&self, local_signer: lib_cryptography::public_key::PublicKey<Self::LocalAlgorithm>, foreign_signer: lib_cryptography::public_key::PublicKey<Self::ForeignAlgorithm>, foreign_signature: lib_cryptography::signature::Signature<Self::ForeignAlgorithm>) -> Result;
+	async fn mint(&self, account: lib_cryptography::public_key::PublicKey<Self::ForeignAlgorithm>, domain: Domain);
+	async fn renew(&self, domain: Domain);
+	
+	// verifies validity, should only be happening sparingly
+	async fn verify_validity(&self, pool_key: u32, coupon: lib_cryptography::hash::Hash<Self::ForeignAlgorithm>);
+	
+	#[cfg(feature = "relay")]
+	async fn claim(&self, pool_key: u32, proofs: Vec<BlindProof<Self::ForeignAlgorithm>>);
+	
+	#[cfg(feature = "server")]							// pool key, naked coupons
+	async fn commit<const T: usize>(&self, amount: Balance) -> (u32, [BlindProof<Self::ForeignAlgorithm>; Transport]);
+}
+
+#[derive(Debug)]
+struct StellarTestnet {
+	dns: lib_cryptography::public_key::PublicKey<()> // address on chain of the dns contract
+}
+
+#[async_trait::async_trait]
+impl Dns for StellarTestnet {
+	type LocalPublicKey = Vec<u8>;
+	type LocalSecretKey = Vec<u8>;
+	type LocalAlgorithm = ();
+	type ForeignAlgorithm = lib_cryptography_algorithm_ed25519::Ed25519Algorithm;
+	
+	async fn attestation(&self, public_key: lib_cryptography::public_key::PublicKey<Self::ForeignAlgorithm>) -> Result<lib_cryptography::public_key::PublicKey<Self::LocalAlgorithm>> {
+		let dns: lib_bytes::NonEmpty = self.dns.to_owned().into();
+		let dns: bytes::Bytes = dns.into();
+		let dns: Vec<_> = dns.to_vec();
+		let dns: &str = str::from_utf8(&dns)?;
+		let public_key: lib_bytes::NonEmpty = public_key.into();
+		let public_key: bytes::Bytes = public_key.into();
+		let public_key: Vec<_> = public_key.to_vec();
+		let public_key: &str = str::from_utf8(&public_key)?;
+		let out: String = duct::cmd!(
+			"stellar", "contract", "invoke",
+			"--network", "remote",
+			"--source", "admin",
+			"--id", &dns,
+			"--",
+			"attestation",
+			"--public_key", &public_key
+		)
+		.read()?;
+		let out: Vec<_> = out.encode_to_vec();
+		let out: bytes::Bytes = out.into();
+		let out: lib_bytes::NonEmpty = out.try_into()?;
+		let out: lib_cryptography::public_key::PublicKey<_> = out.into();
+		Ok(out)
+	}
+	
+	async fn attest(&self, local_signer: lib_cryptography::public_key::PublicKey<Self::LocalAlgorithm>, foreign_signer: lib_cryptography::public_key::PublicKey<Self::ForeignAlgorithm>, foreign_signature: lib_cryptography::signature::Signature<Self::ForeignAlgorithm>) -> Result {
+		let dns: lib_bytes::NonEmpty = self.dns.to_owned().into();
+		let dns: bytes::Bytes = dns.into();
+		let dns: Vec<_> = dns.to_vec();
+		let dns: &str = str::from_utf8(&dns)?;
+		let local_signer: lib_bytes::NonEmpty = local_signer.into();
+		let local_signer: bytes::Bytes = local_signer.into();
+		let local_signer: Vec<_> = local_signer.to_vec();
+		let local_signer: &str = str::from_utf8(&local_signer)?;
+		let foreign_signer: lib_bytes::NonEmpty = foreign_signer.into();
+		let foreign_signer: bytes::Bytes = foreign_signer.into();
+		let foreign_signer: Vec<_> = foreign_signer.to_vec();
+		let foreign_signer: &str = str::from_utf8(&foreign_signer)?;
+		let foreign_signature: lib_bytes::NonEmpty = foreign_signature.into();
+		let foreign_signature: bytes::Bytes = foreign_signature.into();
+		let foreign_signature: Vec<_> = foreign_signature.to_vec();
+		let foreign_signature: &str = str::from_utf8(&foreign_signature)?;
+		duct::cmd!(
+			"stellar", "contract", "invoke",
+			"--network", "remote",
+			"--source", "admin",
+			"--id", &dns,
+			"--",
+			"attest",
+			"--local_signer", &local_signer,
+			"--foreign_signer", &foreign_signer,
+			"--foreign_signature", &foreign_signature
+		)
+		.read()?;
+		Ok(())
+	}
+	
+	async fn mint(&self, account: lib_cryptography::public_key::PublicKey<Self::ForeignAlgorithm>, domain: Domain) {
+		todo!()
+	}
+	
+	async fn renew(&self, domain: Domain) {
+		todo!()
+	}
+	
+	async fn verify_validity(&self, pool_key: u32, coupon: lib_cryptography::hash::Hash<Self::ForeignAlgorithm>) {
+		todo!()
+	}
+	
+	#[cfg(feature = "relay")]
+	async fn claim(&self, pool_key: u32, proofs: Vec<BlindProof<Self::ForeignAlgorithm>>) {
+		todo!()
+	}
+	
+	#[cfg(feature = "server")]							// pool key, naked coupons
+	async fn commit<const T: usize>(&self, amount: Balance) -> (u32, [BlindProof<Self::ForeignAlgorithm>; Transport]) {
+		todo!()
+	}
+}
+
+type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
+
+type Swarm = swarm::Swarm<Behaviour>;
+type SwarmEvent = swarm::SwarmEvent<BehaviourEvent>;
+
+#[derive(Debug)]
+#[derive(derive_more::From)]
+struct Event {
+    item: Box<dyn std::any::Any + Send>
+}
+
+impl Event {
+    pub fn from_any<T>(item: T) -> Self
+    where
+        T: std::any::Any,
+        T: Send,
+        T: 'static {
+        let item: Box<_> = Box::new(item);
+        Self {
+            item
+        }
+    }
+
+    pub fn downcast_ref<T>(&self) -> Option<&T>
+    where
+        T: std::any::Any {
+        self.item.downcast_ref()
+    }
+
+    pub fn downcast_mut<T>(&mut self) -> Option<&mut T>
+    where
+        T: std::any::Any {
+        self.item.downcast_mut()
+    }
+
+    pub fn downcast<T>(self) -> std::result::Result<T, Self>
+    where
+        T: std::any::Any {
+        match self.item.downcast::<T>() {
+            Ok(item) => {
+                let item: T = *item;
+                Ok(item)
+            },
+            Err(item) => {
+                let item: Self = Self {
+                    item
+                };
+                Err(item)
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+#[derive(clap::Parser)]
+#[command(author)]
+#[command(version)]
+#[command(about)]
+struct Cli {
+    #[arg(long)]
+    pub grpc_endpoint: Option<std::net::SocketAddr>,
+    #[arg(long)]
+    pub dial: Option<Vec<libp2p::Multiaddr>>,
+    #[arg(long)]
+    pub seed: Option<String>
+}
+
+
+#[derive(swarm::NetworkBehaviour)]
+struct Behaviour {
+    #[cfg(any(feature = "relay", feature = "malicious_relay"))]
+    pub relay: relay::Behaviour,
+
+    #[cfg(any(
+        feature = "client",
+        feature = "server",
+        feature = "malicious_client",
+        feature = "malicious_server"
+    ))]
+    pub relay_client: relay::client::Behaviour,
+
+    pub autonat: autonat::Behaviour,
+
+    #[cfg(any(
+        feature = "client",
+        feature = "server",
+        feature = "malicious_client",
+        feature = "malicious_server"
+    ))]
+    pub dcutr: dcutr::Behaviour,
+
+    #[cfg(any(
+        feature = "bootstrap",
+        feature = "client",
+        feature = "server",
+        feature = "relay",
+        feature = "malicious_bootstrap",
+        feature = "malicious_client",
+        feature = "malicious_server",
+        feature = "malicious_relay"
+    ))]
+    pub kad: kad::Behaviour<kad::store::MemoryStore>,
+
+    #[cfg(any(
+        feature = "bootstrap",
+        feature = "client",
+        feature = "server",
+        feature = "relay",
+        feature = "malicious_bootstrap",
+        feature = "malicious_client",
+        feature = "malicious_server",
+        feature = "malicious_relay"
+    ))]
+    pub identify: identify::Behaviour,
+
+    #[cfg(any(
+        feature = "bootstrap",
+        feature = "client",
+        feature = "server",
+        feature = "relay",
+        feature = "malicious_bootstrap",
+        feature = "malicious_client",
+        feature = "malicious_server",
+        feature = "malicious_relay"
+    ))]
+    pub stream: libp2p_stream::Behaviour
+}
+
+#[derive(Debug)]
+struct Transport(libp2p::core::transport::Boxed<(libp2p::PeerId, libp2p::core::muxing::StreamMuxerBox)>);
+
+impl TryFrom<&libp2p::identity::Keypair> for Transport {
+	type Error = Box<dyn std::error::Error>;
+	
+	fn try_from(value: &libp2p::identity::Keypair) -> std::result::Result<Self, Self::Error> {
+		let local_keypair = value;
+		
+	    let mut quic_config: quic::Config = quic::Config::new(&local_keypair);
+	    quic_config.handshake_timeout = std::time::Duration::from_millis(3000);
+	    quic_config.keep_alive_interval = std::time::Duration::from_secs(10);
+	    quic_config.max_concurrent_stream_limit = 512;
+	    quic_config.max_connection_data = 10.megabytes().as_u64().to_u32().unwrap();
+	    quic_config.max_idle_timeout = 60000;
+	    quic_config.max_stream_data = 1.megabytes().as_u64().to_u32().unwrap();
+	
+	    let quic = libp2p::quic::tokio::Transport::new(quic_config.to_owned()).map(|(peer_id, muxer), _| (peer_id, libp2p::core::muxing::StreamMuxerBox::new(muxer)));
+
+	    let mut yamux_config = libp2p::yamux::Config::default();
+	    yamux_config.set_receive_window_size(512 * 1024);
+	    yamux_config.set_max_buffer_size(2 * 1024 * 1024);
+	    
+	    let tls_config = libp2p::tls::Config::new(&local_keypair)?;
+	    
+	    let tcp_config: libp2p::tcp::Config = libp2p::tcp::Config::default();
+	    let tcp_config = tcp_config.nodelay(true);
+	    
+	    let tcp = libp2p::tcp::tokio::Transport::new(tcp_config).upgrade(libp2p::core::upgrade::Version::V1).authenticate(tls_config).multiplex(yamux_config).map(|(peer_id, muxer), _| (peer_id, libp2p::core::muxing::StreamMuxerBox::new(muxer)));
+					
+		let ws = libp2p::websocket::WsConfig::new(libp2p::dns::tokio::Transport::system(libp2p::tcp::tokio::Transport::new(libp2p::tcp::Config::default()))?)
+	        .upgrade(libp2p::core::upgrade::Version::V1)
+	        .authenticate(tls_config)
+	        .multiplex(yamux_config)
+			.map(|(peer_id, muxer), _| (peer_id, libp2p::core::muxing::StreamMuxerBox::new(muxer)));
+
+		let out = quic
+    		.or_transport(tcp)
+      		.or_transport(ws)
+        	.map(|either_output, _| match either_output {
+                futures::future::Either::Left(inner) => match inner {
+                    futures::future::Either::Left(res) => res,
+                    futures::future::Either::Right(res) => res,
+                },
+                futures::future::Either::Right(res) => res,
+            })
+         	.boxed();
+		Ok(Self(out))
+	}
+}
+
+impl Into<libp2p::core::transport::Boxed<(libp2p::PeerId, libp2p::core::muxing::StreamMuxerBox)>> for Transport {
+	fn into(self) -> libp2p::core::transport::Boxed<(libp2p::PeerId, libp2p::core::muxing::StreamMuxerBox)> {
+		self.0
+	}
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let cli: Cli = Cli::parse();
+
+    fern::Dispatch::new()
+        .format(|out, message, record| {
+            use colored::Colorize as _;
+
+            let record_time: std::time::SystemTime = std::time::SystemTime::now();
+            let record_time: humantime::Rfc3339Timestamp = humantime::format_rfc3339(record_time);
+            let record_level: colored::ColoredString = match record.level() {
+                log::Level::Debug => record.level().to_string().blue().bold(),
+                log::Level::Trace => record.level().to_string().magenta().bold(),
+                log::Level::Error => record.level().to_string().red().bold(),
+                log::Level::Info => record.level().to_string().green().bold(),
+                log::Level::Warn => record.level().to_string().yellow().bold()
+            };
+            let record_target: &str = record.target();
+            let s: std::fmt::Arguments<'_> = format_args!("[{} {}] {}", record_level, record_target, message);
+            out.finish(s);
+        })
+        .level(log::LevelFilter::Info)
+        .chain(std::io::stdout())
+        .apply()?;
+
+    log::info!("booting");
+
+    let conf: Option<_> = config::Config::from_toml()?;
+
+    let dial: Vec<_> = if let Some(dial) = cli.dial {
+        dial
+    } else if let Some(conf) = &conf && let Some(dial) = &conf.dial {
+        dial.to_owned()
+    } else {
+        vec![]
+    };
+
+    let mut seed: Option<_> = if let Some(seed) = cli.seed {
+    	Some(hex::decode(seed)?)
+    } else if let Ok(seed) = std::env::var("SEED") {
+    	Some(hex::decode(seed)?)
+    } else {
+    	None
+    };
+
+    let version: &str = env!("CARGO_PKG_VERSION");
+    let protocol_version: String = format!("/an/{}", version);
+    let protocol_name: libp2p::StreamProtocol = libp2p::StreamProtocol::new("/an");
+
+    #[cfg(any(feature = "bootstrap", feature = "malicious_bootstrap"))]
+    let agent_version: String = format!("an-bootstrap/{}", version);
+
+    #[cfg(any(feature = "client", feature = "malicious_client"))]
+    let agent_version: String = format!("an-client/{}", version);
+
+    #[cfg(any(feature = "server", feature = "malicious_server"))]
+    let agent_version: String = format!("an-server/{}", version);
+
+    #[cfg(any(feature = "relay", feature = "malicious_relay"))]
+    let agent_version: String = format!("an-relay/{}", version);
+
+    #[cfg(any(feature = "bootstrap", feature = "malicious_bootstrap"))]
+    let identify_cache_size: usize = 50000;
+
+    #[cfg(any(feature = "client", feature = "malicious_client"))]
+    let identify_cache_size: usize = if let Some(conf) = &conf
+    && let Some(client) = &conf.client
+    && let Some(identity_cache_size) = client.identity_cache_size {
+        identity_cache_size
+    } else {
+        1000
+    };
+
+    #[cfg(any(feature = "server", feature = "malicious_server"))]
+    let identify_cache_size: usize = if let Some(conf) = &conf
+    && let Some(server) = &conf.server
+    && let Some(identity_cache_size) = server.identity_cache_size {
+        identity_cache_size
+    } else {
+        2000
+    };
+
+    #[cfg(any(feature = "relay", feature = "malicious_relay"))]
+    let identify_cache_size: usize = if let Some(conf) = &conf
+    && let Some(relay) = &conf.relay
+    && let Some(identity_cache_size) = relay.identity_cache_size {
+        identity_cache_size
+    } else {
+        5000
+    };
+
+    #[cfg(any(feature = "bootstrap", feature = "malicious_bootstrap"))]
+    let identify_interval: std::time::Duration = std::time::Duration::from_secs(5);
+
+    #[cfg(any(feature = "client", feature = "malicious_client"))]
+    let identify_interval: std::time::Duration = std::time::Duration::from_mins(5);
+
+    #[cfg(any(feature = "server", feature = "malicious_server"))]
+    let identify_interval: std::time::Duration = std::time::Duration::from_mins(5);
+
+    #[cfg(any(feature = "relay", feature = "malicious_relay"))]
+    let identify_interval: std::time::Duration = std::time::Duration::from_mins(5);
+
+    let local_keypair: libp2p::identity::Keypair = if let Some(seed) = &mut seed {
+    	libp2p::identity::Keypair::ed25519_from_bytes(seed)?
+    } else {
+    	libp2p::identity::Keypair::generate_ed25519()
+    };
+    let local_public_key: libp2p::identity::PublicKey = local_keypair.public();
+    let local_peer_id: libp2p::PeerId = local_keypair.public().into();
+
+    log::info!("peer identity initialized: {:?}", local_peer_id);
+    
+    let mut yamux_config = libp2p::yamux::Config::default();
+    yamux_config.set_receive_window_size(512 * 1024);
+    yamux_config.set_max_buffer_size(2 * 1024 * 1024);
+    
+    let tls_config = libp2p::tls::Config::new(&local_keypair)?;
+    
+    let tcp_config: libp2p::tcp::Config = libp2p::tcp::Config::default();
+    let tcp_config = tcp_config.nodelay(true);
+    
+    let tcp = libp2p::tcp::tokio::Transport::new(tcp_config).upgrade(libp2p::core::upgrade::Version::V1).authenticate(tls_config).multiplex(yamux_config);
+    
+    let mut quic_config: quic::Config = quic::Config::new(&local_keypair);
+    quic_config.handshake_timeout = std::time::Duration::from_millis(3000);
+    quic_config.keep_alive_interval = std::time::Duration::from_secs(10);
+    quic_config.max_concurrent_stream_limit = 512;
+    quic_config.max_connection_data = 10.megabytes().as_u64().to_u32().unwrap();
+    quic_config.max_idle_timeout = 60000;
+    quic_config.max_stream_data = 1.megabytes().as_u64().to_u32().unwrap();
+
+    let quic = libp2p::quic::tokio::Transport::new(quic_config.to_owned());
+
+    
+    let transport = quic.or_transport(tcp);
+    
+    
+    #[cfg(any(feature = "bootstrap", feature = "malicious_bootstrap"))]
+    let mut swarm: libp2p::Swarm<_> = libp2p::SwarmBuilder::with_existing_identity(local_keypair)
+        .with_tokio()
+        .with_quic_config(|_| quic_config)
+        .with_behaviour(|_| {
+            let kad_store: kad::store::MemoryStore = kad::store::MemoryStore::new(local_peer_id);
+
+            let mut kad_conf: kad::Config = kad::Config::new(protocol_name);
+            kad_conf.disjoint_query_paths(true);
+            kad_conf.set_caching(kad::Caching::Enabled{ max_peers: 256 });
+            kad_conf.set_kbucket_inserts(kad::BucketInserts::Manual);
+            kad_conf.set_kbucket_pending_timeout(std::time::Duration::from_mins(1));
+            kad_conf.set_kbucket_size(
+                128.try_into().expect("non zero")
+            );
+            kad_conf.set_max_packet_size(
+                1.kilobytes().as_u64().to_usize().unwrap()
+            );
+            kad_conf.set_parallelism(
+                32.try_into().expect("non zero")
+            );
+            kad_conf.set_periodic_bootstrap_interval(Some(std::time::Duration::from_mins(5)));
+            kad_conf.set_provider_publication_interval(None);
+            kad_conf.set_provider_record_ttl(Some(std::time::Duration::from_hours(72)));
+            kad_conf.set_publication_interval(None);
+            kad_conf.set_query_timeout(std::time::Duration::from_secs(30));
+            kad_conf.set_record_filtering(kad::StoreInserts::FilterBoth);
+            kad_conf.set_record_ttl(Some(std::time::Duration::from_hours(72)));
+            kad_conf.set_replication_factor(
+                256.try_into().expect("non zero")
+            );
+            kad_conf.set_replication_interval(Some(std::time::Duration::from_hours(1)));
+            kad_conf.set_substreams_timeout(std::time::Duration::from_millis(20000));
+
+            let mut kad: kad::Behaviour<_> = kad::Behaviour::with_config(local_peer_id, kad_store, kad_conf);
+
+            kad.set_mode(Some(kad::Mode::Server));
+
+            let mut autonat_conf = autonat::Config::default();
+            autonat_conf.boot_delay = std::time::Duration::from_secs(1);
+            autonat_conf.confidence_max = 3;
+            autonat_conf.max_peer_addresses = 10;
+            autonat_conf.only_global_ips = false;
+            autonat_conf.refresh_interval = std::time::Duration::from_hours(1);
+            autonat_conf.retry_interval = std::time::Duration::from_secs(60);
+            autonat_conf.throttle_clients_global_max = 1000;
+            autonat_conf.throttle_clients_peer_max = 10;
+            autonat_conf.throttle_clients_period = std::time::Duration::from_secs(1);
+            autonat_conf.throttle_server_period = std::time::Duration::from_secs(30);
+            autonat_conf.timeout = std::time::Duration::from_secs(30);
+            autonat_conf.use_connected = true;
+
+            let autonat = autonat::Behaviour::new(local_peer_id, autonat_conf);
+
+            let identify_config: identify::Config = identify::Config::new(protocol_version, local_public_key)
+                .with_agent_version(agent_version)
+                .with_cache_size(identify_cache_size)
+                .with_hide_listen_addrs(false)
+                .with_interval(identify_interval)
+                .with_push_listen_addr_updates(true);
+
+            let identify: identify::Behaviour = identify::Behaviour::new(identify_config);
+
+            let stream: libp2p_stream::Behaviour = libp2p_stream::Behaviour::default();
+
+            Behaviour {
+                autonat,
+                kad,
+                identify,
+                stream
+            }
+        })?
+        .build();
+
+    #[cfg(any(feature = "client", feature = "malicious_client"))]
+    let mut swarm: libp2p::Swarm<_> = libp2p::SwarmBuilder::with_existing_identity(local_keypair)
+        .with_tokio()
+        .with_quic_config(|_| quic_config)
+        .with_relay_client(noise::Config::new, yamux::Config::default)?
+        .with_behaviour(|_, relay_client| {
+            let kad_store: kad::store::MemoryStore = kad::store::MemoryStore::new(local_peer_id);
+
+            let mut kad_conf: kad::Config = kad::Config::new(protocol_name);
+            kad_conf.disjoint_query_paths(true);
+            kad_conf.set_caching(kad::Caching::Enabled{ max_peers: 64 });
+            kad_conf.set_kbucket_inserts(kad::BucketInserts::Manual);
+            kad_conf.set_kbucket_pending_timeout(std::time::Duration::from_mins(1));
+            kad_conf.set_kbucket_size(kad::K_VALUE);
+            kad_conf.set_max_packet_size(
+                1.kilobytes().as_u64().to_usize().unwrap()
+            );
+            kad_conf.set_parallelism(kad::ALPHA_VALUE);
+            kad_conf.set_periodic_bootstrap_interval(Some(std::time::Duration::from_mins(5)));
+            kad_conf.set_provider_publication_interval(None);
+            kad_conf.set_provider_record_ttl(None);
+            kad_conf.set_publication_interval(None);
+            kad_conf.set_query_timeout(std::time::Duration::from_mins(1));
+            kad_conf.set_record_filtering(kad::StoreInserts::FilterBoth);
+            kad_conf.set_record_ttl(Some(std::time::Duration::from_hours(48)));
+            kad_conf.set_replication_factor(kad::K_VALUE);
+            kad_conf.set_replication_interval(None);
+            kad_conf.set_substreams_timeout(std::time::Duration::from_secs(10));
+
+            let mut kad: kad::Behaviour<_> = kad::Behaviour::with_config(local_peer_id, kad_store, kad_conf);
+
+            kad.set_mode(Some(kad::Mode::Client));
+
+            let mut autonat_conf = autonat::Config::default();
+            autonat_conf.boot_delay = std::time::Duration::from_secs(1);
+            autonat_conf.confidence_max = 3;
+            autonat_conf.max_peer_addresses = 5;
+            autonat_conf.only_global_ips = false;
+            autonat_conf.refresh_interval = std::time::Duration::from_mins(15);
+            autonat_conf.retry_interval = std::time::Duration::from_secs(30);
+            autonat_conf.throttle_clients_global_max = 0;
+            autonat_conf.throttle_clients_peer_max = 0;
+            autonat_conf.throttle_clients_period = std::time::Duration::from_secs(60);
+            autonat_conf.throttle_server_period = std::time::Duration::from_secs(60);
+            autonat_conf.timeout = std::time::Duration::from_secs(15);
+            autonat_conf.use_connected = true;
+
+            let autonat = autonat::Behaviour::new(local_peer_id, autonat_conf);
+
+            let dcutr: dcutr::Behaviour = dcutr::Behaviour::new(local_peer_id);
+
+            let identify_config: identify::Config = identify::Config::new(protocol_version, local_public_key)
+                .with_agent_version(agent_version)
+                .with_cache_size(identify_cache_size)
+                .with_hide_listen_addrs(true)
+                .with_interval(identify_interval)
+                .with_push_listen_addr_updates(true);
+
+            let identify: identify::Behaviour = identify::Behaviour::new(identify_config);
+
+            let stream: libp2p_stream::Behaviour = libp2p_stream::Behaviour::default();
+
+            Behaviour {
+                relay_client,
+                autonat,
+                dcutr,
+                kad,
+                identify,
+                stream
+            }
+        })?
+        .build();
+
+    #[cfg(any(feature = "server", feature = "malicious_server"))]
+    let mut swarm: libp2p::Swarm<_> = libp2p::SwarmBuilder::with_existing_identity(local_keypair)
+        .with_tokio()
+        .with_quic_config(|_| quic_config)
+        .with_relay_client(noise::Config::new, yamux::Config::default)?
+        .with_behaviour(|_, relay_client| {
+            let kad_store: kad::store::MemoryStore = kad::store::MemoryStore::new(local_peer_id);
+
+            let mut kad_conf: kad::Config = kad::Config::new(protocol_name);
+            kad_conf.disjoint_query_paths(true);
+            kad_conf.set_caching(kad::Caching::Enabled{ max_peers: 256 });
+            kad_conf.set_kbucket_inserts(kad::BucketInserts::Manual);
+            kad_conf.set_kbucket_pending_timeout(std::time::Duration::from_mins(1));
+            kad_conf.set_kbucket_size(kad::K_VALUE);
+            kad_conf.set_max_packet_size(
+                1.kilobytes().as_u64().to_usize().unwrap()
+            );
+            kad_conf.set_parallelism(kad::ALPHA_VALUE);
+            kad_conf.set_periodic_bootstrap_interval(Some(std::time::Duration::from_mins(5)));
+            kad_conf.set_provider_publication_interval(Some(std::time::Duration::from_hours(6)));
+            kad_conf.set_provider_record_ttl(Some(std::time::Duration::from_hours(48)));
+            kad_conf.set_publication_interval(Some(std::time::Duration::from_hours(24)));
+            kad_conf.set_query_timeout(std::time::Duration::from_mins(1));
+            kad_conf.set_record_filtering(kad::StoreInserts::FilterBoth);
+            kad_conf.set_record_ttl(Some(std::time::Duration::from_hours(48)));
+            kad_conf.set_replication_factor(kad::K_VALUE);
+            kad_conf.set_replication_interval(None);
+            kad_conf.set_substreams_timeout(std::time::Duration::from_secs(10));
+
+            let mut kad: kad::Behaviour<_> = kad::Behaviour::with_config(local_peer_id, kad_store, kad_conf);
+
+            kad.set_mode(Some(kad::Mode::Server));
+
+            let mut autonat_conf = autonat::Config::default();
+            autonat_conf.boot_delay = std::time::Duration::from_secs(1);
+            autonat_conf.confidence_max = 3;
+            autonat_conf.max_peer_addresses = 8;
+            autonat_conf.only_global_ips = false;
+            autonat_conf.refresh_interval = std::time::Duration::from_mins(30);
+            autonat_conf.retry_interval = std::time::Duration::from_secs(60);
+            autonat_conf.throttle_clients_global_max = 50;
+            autonat_conf.throttle_clients_peer_max = 3;
+            autonat_conf.throttle_clients_period = std::time::Duration::from_secs(5);
+            autonat_conf.throttle_server_period = std::time::Duration::from_secs(30);
+            autonat_conf.timeout = std::time::Duration::from_secs(30);
+            autonat_conf.use_connected = true;
+
+            let autonat = autonat::Behaviour::new(local_peer_id, autonat_conf);
+
+            let dcutr: dcutr::Behaviour = dcutr::Behaviour::new(local_peer_id);
+
+            let identify_config: identify::Config = identify::Config::new(protocol_version, local_public_key)
+                .with_agent_version(agent_version)
+                .with_cache_size(identify_cache_size)
+                .with_hide_listen_addrs(false)
+                .with_interval(identify_interval)
+                .with_push_listen_addr_updates(true);
+
+            let identify: identify::Behaviour = identify::Behaviour::new(identify_config);
+
+            let stream: libp2p_stream::Behaviour = libp2p_stream::Behaviour::default();
+
+            Behaviour {
+                relay_client,
+                autonat,
+                dcutr,
+                kad,
+                identify,
+                stream
+            }
+        })?
+        .build();
+
+    #[cfg(any(feature = "relay", feature = "malicious_relay"))]
+    let mut swarm: libp2p::Swarm<_> = libp2p::SwarmBuilder::with_existing_identity(local_keypair)
+        .with_tokio()
+        .with_quic_config(|_| quic_config)
+        .with_behaviour(|_| {
+            let relay_config: relay::Config = relay::Config {
+                max_circuit_bytes: 1.mebibytes().as_u64(),
+                max_circuit_duration: std::time::Duration::from_secs(300),
+                max_reservations: 512,
+                max_reservations_per_peer: 2,
+                max_circuits: 1024,
+                max_circuits_per_peer: 4,
+                reservation_duration: std::time::Duration::from_hours(1),
+                reservation_rate_limiters: vec![],
+                circuit_src_rate_limiters: vec![]
+            };
+            let relay: relay::Behaviour = relay::Behaviour::new(local_peer_id, relay_config);
+
+            let kad_store: kad::store::MemoryStore = kad::store::MemoryStore::new(local_peer_id);
+
+            let mut kad_conf: kad::Config = kad::Config::new(protocol_name);
+            kad_conf.disjoint_query_paths(true);
+            kad_conf.set_caching(kad::Caching::Enabled{ max_peers: 128 });
+            kad_conf.set_kbucket_inserts(kad::BucketInserts::Manual);
+            kad_conf.set_kbucket_pending_timeout(std::time::Duration::from_millis(60000));
+            kad_conf.set_kbucket_size(
+                64.try_into().expect("non zero")
+            );
+            kad_conf.set_max_packet_size(
+                1.kilobytes().as_u64().to_usize().unwrap()
+            );
+            kad_conf.set_parallelism(
+                16.try_into().expect("non zero")
+            );
+            kad_conf.set_periodic_bootstrap_interval(Some(std::time::Duration::from_mins(5)));
+            kad_conf.set_provider_publication_interval(None);
+            kad_conf.set_provider_record_ttl(None);
+            kad_conf.set_publication_interval(None);
+            kad_conf.set_query_timeout(std::time::Duration::from_mins(1));
+            kad_conf.set_record_filtering(kad::StoreInserts::FilterBoth);
+            kad_conf.set_record_ttl(Some(std::time::Duration::from_hours(24)));
+            kad_conf.set_replication_factor(
+                64.try_into().expect("non zero")
+            );
+            kad_conf.set_replication_interval(Some(std::time::Duration::from_hours(2)));
+            kad_conf.set_substreams_timeout(std::time::Duration::from_secs(10));
+
+            let mut kad: kad::Behaviour<_> = kad::Behaviour::with_config(local_peer_id, kad_store, kad_conf);
+
+            kad.set_mode(Some(kad::Mode::Server));
+
+            let mut autonat_conf = autonat::Config::default();
+            autonat_conf.boot_delay = std::time::Duration::from_secs(1);
+            autonat_conf.confidence_max = 3;
+            autonat_conf.max_peer_addresses = 10;
+            autonat_conf.only_global_ips = false;
+            autonat_conf.refresh_interval = std::time::Duration::from_hours(1);
+            autonat_conf.retry_interval = std::time::Duration::from_secs(60);
+            autonat_conf.throttle_clients_global_max = 1000;
+            autonat_conf.throttle_clients_peer_max = 10;
+            autonat_conf.throttle_clients_period = std::time::Duration::from_secs(1);
+            autonat_conf.throttle_server_period = std::time::Duration::from_secs(30);
+            autonat_conf.timeout = std::time::Duration::from_secs(30);
+            autonat_conf.use_connected = true;
+
+            let autonat = autonat::Behaviour::new(local_peer_id, autonat_conf);
+
+            let identify_config: identify::Config = identify::Config::new(protocol_version, local_public_key)
+                .with_agent_version(agent_version)
+                .with_cache_size(identify_cache_size)
+                .with_hide_listen_addrs(false)
+                .with_interval(identify_interval)
+                .with_push_listen_addr_updates(true);
+
+            let identify: identify::Behaviour = identify::Behaviour::new(identify_config);
+
+            let stream: libp2p_stream::Behaviour = libp2p_stream::Behaviour::default();
+
+            Behaviour {
+                relay,
+                autonat,
+                kad,
+                identify,
+                stream
+            }
+        })
+        .expect("")
+        .build();
+
+    swarm.listen_on("/ip4/0.0.0.0/udp/4001/quic-v1".parse()?)?;
+    swarm.listen_on("/ip4/0.0.0.0/tcp/4001".parse()?)?;
+    swarm.listen_on("/ip4/0.0.0.0/tcp/443/wss".parse()?)?;
+
+    #[cfg(any(feature = "server", feature = "malicious_server"))] {
+        for addr in &dial {
+            if addr.to_string().contains("p2p") {
+                let is_p2p: bool = addr.iter().any(|protocol| matches!(protocol, libp2p::multiaddr::Protocol::P2p(_)));
+
+                if is_p2p {
+                    let circuit_addr: libp2p::Multiaddr = addr.clone().with(libp2p::multiaddr::Protocol::P2pCircuit);
+
+                    log::info!("server attempting relay reservation: {}", circuit_addr);
+
+                    // these are speculative attempts
+                    swarm.listen_on(circuit_addr).ok();
+                }
+            }
+        }
+    }
+
+    let (sx, mut rx) = tokio::sync::mpsc::channel::<Event>(1000);
+
+    let grpc_endpoint: std::net::SocketAddr = if let Some(grpc_endpoint) = cli.grpc_endpoint {
+        grpc_endpoint
+    } else if let Some(conf) = &conf && let Some(grpc) = &conf.grpc_endpoint {
+        grpc.to_owned()
+    } else {
+        "0.0.0.0:8080".parse()?
+    };
+
+    let grpc_server: grpc::Server = grpc::Server::new(sx);
+    let grpc_server: grpc::proto::node_server::NodeServer<_> = grpc::proto::node_server::NodeServer::new(grpc_server);
+    let grpc = tonic::transport::Server::builder()
+        .add_service(grpc_server)
+        .serve(grpc_endpoint);
+
+    let ctrl_c = tokio::signal::ctrl_c();
+
+    tokio::pin!(grpc);
+    tokio::pin!(ctrl_c);
+
+    let bootstrap: sub_system::bootstrap::Bootstrap = sub_system::bootstrap::Bootstrap::builder()
+        .cooldown(std::time::Duration::from_secs(16))
+        .timeout_duration(std::time::Duration::from_secs(8))
+        .min_peers(2)
+        .addrs(dial)
+        .build();
+
+    let connection_manager: sub_system::connection_manager::ConnectionManager = sub_system::connection_manager::ConnectionManager::builder()
+        .target_peer_count(2)
+        .min_retry_delay(std::time::Duration::from_secs(8))
+        .max_retry_delay(std::time::Duration::from_secs(32))
+        .build();
+
+    let routing_monitor: sub_system::routing_monitor::RoutingMonitor = sub_system::routing_monitor::RoutingMonitor::builder()
+        .sample_interval(std::time::Duration::from_secs(30))
+        .collapse_threshold(2)
+        .churn_window(std::time::Duration::from_secs(30))
+        .build();
+
+    let discovery_monitor: sub_system::discovery_monitor::DiscoveryMonitor = sub_system::discovery_monitor::DiscoveryMonitor::builder()
+        .interval(std::time::Duration::from_secs(5))
+        .build();
+
+    let mut sub_system_bus: sub_system::Bus = sub_system::Bus::default();
+    sub_system_bus.add_system(bootstrap);
+    // sub_system_bus.add_system(connection_manager);
+    sub_system_bus.add_system(routing_monitor);
+    sub_system_bus.add_system(discovery_monitor);
+    sub_system_bus.add_system(sub_system::dialer::Dialer);
+    sub_system_bus.add_system(sub_system::metadata::Metadata);
+    sub_system_bus.add_system(sub_system::monitor::Monitor);
+    sub_system_bus.add_system(sub_system::session_manager::SessionManager::default());
+
+    cfg_if::cfg_if!(
+        if #[cfg(feature = "malicious_relay")] {
+            let identity_spoofer: sub_system::identity_spoofer::IdentitySpoofer = sub_system::identity_spoofer::IdentitySpoofer::builder()
+                .interval(std::time::Duration::from_secs(30))
+                .build();
+
+            let slug: sub_system::slug::Slug = sub_system::slug::Slug::builder()
+                .delay(std::time::Duration::from_secs(30))
+                .build();
+
+            sub_system_bus.add_system(sub_system::dht_poison::DhtPoison);
+            sub_system_bus.add_system(sub_system::relay_killer::RelayKiller);
+            // sub_system_bus.add_system(sub_system::self_destruct::SelfDestruct);
+            sub_system_bus.add_system(identity_spoofer);
+            sub_system_bus.add_system(slug);
+        }
+    );
+
+    log::info!("finished booting, entering event loop");
+
+    loop {
+        tokio::select!(
+            _ = &mut ctrl_c => {
+                break
+            },
+            _ = &mut grpc => {
+                break
+            },
+            event = swarm.select_next_some() => {
+                sub_system_bus.receive(&mut swarm, Event::from_any(event))
+            },
+            Some(event) = rx.recv() => {
+                sub_system_bus.receive(&mut swarm, event)
+            }
+        );
+    }
+
+    tokio::signal::ctrl_c().await?;
+    Ok(())
+}

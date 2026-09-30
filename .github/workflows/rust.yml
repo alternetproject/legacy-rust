@@ -1,0 +1,17 @@
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+env:
+  CARGO_TERM_COLOR: always
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: dtolnay/rust-toolchain@stable
+    - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+    - run: cargo build
+    - run: cargo run --package task build-node-release
+    - run: cargo test

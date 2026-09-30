@@ -1,0 +1,38 @@
+syntax = "proto3";
+
+package an;
+
+message PingRequest {
+    string msg = 1;
+}
+
+message PingResponse {
+    bool success = 1;
+}
+
+message DialRequest {
+    string addr = 1;
+}
+
+message DialResponse {
+    bool success = 1;
+    optional string error = 2;
+    optional string connection = 3;
+}
+
+
+message PeerIdRequest {}
+
+message PeerIdResponse {
+    string peer_id = 1;
+}
+
+service Node {
+    rpc PeerId(PeerIdRequest) returns (PeerIdResponse);
+
+    rpc Ping(PingRequest) returns (PingResponse);
+
+
+
+    rpc Dial(DialRequest) returns (DialResponse);
+}

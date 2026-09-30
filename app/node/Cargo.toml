@@ -1,0 +1,144 @@
+[package]
+name = "node"
+version = "0.1.0"
+edition = "2024"
+readme = "readme.md"
+build = "build.rs"
+publish = false
+
+[dependencies]
+lib_packet = { version = "*", package = "packet", path = "../../lib/packet" }
+lib_bytes = { version = "*", package = "bytes", path = "../../lib/bytes" }
+lib_cryptography = { version = "*", package = "cryptography", path = "../../lib/cryptography" }
+lib_cryptography_algorithm_ed25519 = { version = "*", package = "cryptography_algorithm_ed25519", path = "../../lib/cryptography_algorithm/ed25519" }
+bytes = "*"
+rand = "*"
+rand_core = "*"
+async-trait = "*"
+futures = "*"
+tokio = { version = "1.48.0", features = ["full"] }
+tokio-stream = "*"
+tokio-util = { version = "*", features = ["compat"] }
+libp2p-stream = "0.4.0-alpha"
+libp2p = { version = "0.56.0", features = [
+    "tcp",
+    "quic",
+    "noise",
+    "yamux",
+    "mdns",
+    "kad",
+    "ping",
+    "identify",
+    "relay",
+    "macros",
+    "tls",
+    "gossipsub",
+    "request-response",
+    "dcutr",
+    "autonat",
+    "tokio",
+    "websocket",
+    "dns"
+] }
+toml = "*"
+bon = "*"
+serde = { version = "*", features = ["derive"] }
+serde_json = "*"
+tonic = "0.14.5"
+tonic-prost = "*"
+tonic-reflection = "*"
+prost = "0.14.3"
+fern = "*"
+log = "*"
+colored = "*"
+humantime = "*"
+modwire = "*"
+derive_more = { version = "*", features = ["full"] }
+num = "0.4.3"
+enum_dispatch = "*"
+clap = { version = "*", features = ["derive"] }
+ubyte = "*"
+cfg-if = "*"
+anyhow = "*"
+url = "*"
+nanoid = "*"
+hex = "*"
+ed25519-dalek = { version = "2.1.0", features = ["rand_core"] }
+duct = "*"
+
+[dev-dependencies]
+testcontainers = "*"
+tokio = { version = "1.48.0", features = ["macros", "rt-multi-thread"] }
+bollard = "*"
+cargo_metadata = "*"
+futures-util = "*"
+reqwest = "*"
+async-trait = "*"
+chrono = "*"
+getset = "*"
+derive_more = "*"
+serde = { version = "*", features = ["derive"] }
+derivative = "*"
+bon = "*"
+strum = { version = "*", features = ["derive"] }
+thiserror = "*"
+image = { version = "*", path = "../../image" }
+e2e = { version = "*", path = "../../lib/e2e" }
+duct = "*"
+
+[build-dependencies]
+tonic-prost = "*"
+tonic-prost-build = "0.14.5"
+
+[[bin]]
+name = "bootstrap"
+path = "src/main.rs"
+required-features = ["bootstrap"]
+
+[[bin]]
+name = "client"
+path = "src/main.rs"
+required-features = ["client"]
+
+[[bin]]
+name = "server"
+path = "src/main.rs"
+required-features = ["server"]
+
+[[bin]]
+name = "relay"
+path = "src/main.rs"
+required-features = ["relay"]
+
+[[bin]]
+name = "malicious_bootstrap"
+path = "src/main.rs"
+required-features = ["malicious_bootstrap"]
+
+[[bin]]
+name = "malicious_client"
+path = "src/main.rs"
+required-features = ["malicious_client"]
+
+[[bin]]
+name = "malicious_server"
+path = "src/main.rs"
+required-features = ["malicious_server"]
+
+[[bin]]
+name = "malicious_relay"
+path = "src/main.rs"
+required-features = ["malicious_relay"]
+
+[features]
+default = ["relay", "end_to_end"]
+bootstrap = []
+client = []
+server = []
+relay = []
+malicious_bootstrap = []
+malicious_client = []
+malicious_server = []
+malicious_relay = ["tokio/full"]
+grpc = []
+end_to_end = []

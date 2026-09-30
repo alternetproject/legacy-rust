@@ -1,0 +1,11 @@
+[package]
+name = "packet"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+lib_cryptography = { version = "*", package = "cryptography", path = "../cryptography" }
+lib_bytes = { version = "*", package = "bytes", path = "../bytes" }
+derive_more = { version = "*", features = ["full"] }
+bytes = "*"
+modwire = "*"

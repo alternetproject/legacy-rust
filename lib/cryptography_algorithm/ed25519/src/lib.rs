@@ -1,0 +1,71 @@
+
+use ed25519_dalek::Verifier as _;
+use ed25519_dalek::Signer as _;
+
+const PUBLIC_KEY_LEN: usize = 32;
+const SECRET_KEY_LEN: usize = 32;
+const SIGNATURE_LEN: usize = 64;
+
+#[derive(Debug)]
+#[derive(Clone)]
+pub struct Ed25519Algorithm;
+
+impl lib_cryptography::Algorithm for Ed25519Algorithm {}
+
+impl lib_cryptography::AsymmetricSetLayout for Ed25519Algorithm {
+	const PUBLIC_KEY_LEN: usize = PUBLIC_KEY_LEN;
+	const SECRET_KEY_LEN: usize = SECRET_KEY_LEN;
+	const SIGNATURE_LEN: usize = SIGNATURE_LEN;
+}
+
+impl lib_cryptography::AsymmetricKeyGenAlgorithm for Ed25519Algorithm {
+	fn generate() -> lib_cryptography::Result<lib_cryptography::pair::Pair<Self>> {
+		let signing_key: ed25519_dalek::SigningKey = ed25519_dalek::SigningKey::generate(&mut rand_core::OsRng);
+		let verifying_key: ed25519_dalek::VerifyingKey = signing_key.verifying_key();
+		let verifying_key: &[_; _] = verifying_key.as_bytes();
+		let signing_key: [_; _] = signing_key.to_bytes();
+		let signing_key: &[_] = signing_key.as_slice();
+		let secret_key: bytes::Bytes = bytes::Bytes::copy_from_slice(signing_key);
+		let secret_key: lib_bytes::NonEmpty = secret_key.try_into()?;
+		let secret_key: lib_cryptography::secret_key::SecretKey<_> = secret_key.into();
+		let public_key: bytes::Bytes = bytes::Bytes::copy_from_slice(verifying_key);
+		let public_key: lib_bytes::NonEmpty = public_key.try_into()?;
+		let public_key: lib_cryptography::public_key::PublicKey<_> = public_key.into();
+		let out: lib_cryptography::pair::Pair<_> = (public_key, secret_key).into();
+		Ok(out)
+	}
+}
+
+impl lib_cryptography::AsymmetricSignatureAlgorithm for Ed25519Algorithm {
+	fn sign(secret_key: &lib_cryptography::secret_key::SecretKey<Self>, message: &lib_cryptography::message::Message) -> lib_cryptography::Result<lib_cryptography::signature::Signature<Self>> {
+		let message: lib_bytes::NonEmpty = message.to_owned().into();
+		let message: bytes::Bytes = message.into();
+		let message: &[_] = message.as_ref();
+		let secret_key: lib_bytes::NonEmpty = secret_key.to_owned().into();
+		let secret_key: bytes::Bytes = secret_key.into();
+		let secret_key: [u8; SECRET_KEY_LEN] = secret_key.as_ref().try_into()?;
+		let signing_key: ed25519_dalek::SigningKey = ed25519_dalek::SigningKey::from_bytes(&secret_key);
+		let out: ed25519::Signature = signing_key.sign(message);
+		let out: [_; _] = out.to_bytes();
+		let out: bytes::Bytes = bytes::Bytes::copy_from_slice(&out);
+		let out: lib_bytes::NonEmpty = out.try_into()?;
+		let out: lib_cryptography::signature::Signature<Self> = out.into();
+		Ok(out)
+	}
+	
+	fn verify(public_key: &lib_cryptography::public_key::PublicKey<Self>, message: &lib_cryptography::message::Message, signature: &lib_cryptography::signature::Signature<Self>) -> lib_cryptography::Result<bool> {
+		let message: lib_bytes::NonEmpty = message.to_owned().into();
+		let message: bytes::Bytes = message.into();
+		let message: &[_] = message.as_ref();
+		let public_key: lib_bytes::NonEmpty = public_key.to_owned().into();
+		let public_key: bytes::Bytes = public_key.into();
+		let public_key: [u8; PUBLIC_KEY_LEN] = public_key.as_ref().try_into()?;
+		let signature: lib_bytes::NonEmpty = signature.to_owned().into();
+		let signature: bytes::Bytes = signature.into();
+		let signature: &[_; _] = signature.as_ref().try_into()?;
+		let signature: ed25519::Signature = ed25519_dalek::Signature::from_bytes(signature);
+		let out: ed25519_dalek::VerifyingKey = ed25519_dalek::VerifyingKey::from_bytes(&public_key)?;
+		let out: bool = out.verify(message, &signature).is_ok();
+		Ok(out)
+	}
+}
